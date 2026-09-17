@@ -616,6 +616,35 @@ def test_overload_results_in_suitable_http_error(request):
     assert response.status_code == HTTPStatus.SERVICE_UNAVAILABLE
 
 
+def test_serve_unservicable_logs_errors_without_crashing(mocker, capsys):
+    """A failure while sending a 503 must be logged, not raise AttributeError.
+
+    Regression test: ``HTTPServer._serve_unservicable()`` called
+    ``self.server.error_log(...)``, but ``HTTPServer`` has no ``server``
+    attribute -- that belongs to ``HTTPConnection``, which is a different
+    class. So instead of logging the original failure, it raised a fresh
+    ``AttributeError`` from within the except-block meant to keep this
+    background thread alive. See issue #797.
+    """
+    from .. import server as server_module
+
+    httpserver = HTTPServer.__new__(HTTPServer)
+    httpserver.ready = True
+    httpserver._unservicable_conns = queue.Queue()
+    fake_conn = mocker.Mock()
+    httpserver._unservicable_conns.put(fake_conn)
+    httpserver._unservicable_conns.put(server_module._STOPPING_FOR_INTERRUPT)
+
+    fake_request = mocker.Mock()
+    fake_request.simple_response.side_effect = ValueError('boom')
+    mocker.patch.object(server_module, 'HTTPRequest', return_value=fake_request)
+
+    httpserver._serve_unservicable()  # must not raise
+
+    assert 'boom' in capsys.readouterr().err
+    fake_conn.close.assert_called_once()
+
+
 def test_overload_thread_does_not_leak():
     """On shutdown the overload thread exits.
 
