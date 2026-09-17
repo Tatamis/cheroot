@@ -637,7 +637,11 @@ def test_serve_unservicable_logs_errors_without_crashing(mocker, capsys):
 
     fake_request = mocker.Mock()
     fake_request.simple_response.side_effect = ValueError('boom')
-    mocker.patch.object(server_module, 'HTTPRequest', return_value=fake_request)
+    mocker.patch.object(
+        server_module,
+        'HTTPRequest',
+        return_value=fake_request,
+    )
 
     httpserver._serve_unservicable()  # must not raise
 
