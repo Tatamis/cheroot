@@ -20,7 +20,12 @@ import requests_unixsocket
 from pypytools.gc.custom import DefaultGc
 
 from .._compat import IS_LINUX, IS_MACOS, IS_WINDOWS, SYS_PLATFORM, bton, ntob
-from ..server import IS_UID_GID_RESOLVABLE, Gateway, HTTPServer
+from ..server import (
+    _STOPPING_FOR_INTERRUPT,
+    IS_UID_GID_RESOLVABLE,
+    Gateway,
+    HTTPServer,
+)
 from ..testing import (
     ANY_INTERFACE_IPV4,
     ANY_INTERFACE_IPV6,
@@ -626,22 +631,16 @@ def test_serve_unservicable_logs_errors_without_crashing(mocker, capsys):
     ``AttributeError`` from within the except-block meant to keep this
     background thread alive. See issue #797.
     """
-    from .. import server as server_module
-
     httpserver = HTTPServer.__new__(HTTPServer)
     httpserver.ready = True
     httpserver._unservicable_conns = queue.Queue()
     fake_conn = mocker.Mock()
     httpserver._unservicable_conns.put(fake_conn)
-    httpserver._unservicable_conns.put(server_module._STOPPING_FOR_INTERRUPT)
+    httpserver._unservicable_conns.put(_STOPPING_FOR_INTERRUPT)
 
     fake_request = mocker.Mock()
     fake_request.simple_response.side_effect = ValueError('boom')
-    mocker.patch.object(
-        server_module,
-        'HTTPRequest',
-        return_value=fake_request,
-    )
+    mocker.patch('cheroot.server.HTTPRequest', return_value=fake_request)
 
     httpserver._serve_unservicable()  # must not raise
 
