@@ -9,6 +9,7 @@ import sys
 import tempfile
 import threading
 import types
+import typing as _t
 import urllib.parse  # noqa: WPS301
 import uuid
 from http import HTTPStatus
@@ -20,12 +21,7 @@ import requests_unixsocket
 from pypytools.gc.custom import DefaultGc
 
 from .._compat import IS_LINUX, IS_MACOS, IS_WINDOWS, SYS_PLATFORM, bton, ntob
-from ..server import (
-    _STOPPING_FOR_INTERRUPT,
-    IS_UID_GID_RESOLVABLE,
-    Gateway,
-    HTTPServer,
-)
+from ..server import IS_UID_GID_RESOLVABLE, Gateway, HTTPRequest, HTTPServer
 from ..testing import (
     ANY_INTERFACE_IPV4,
     ANY_INTERFACE_IPV6,
@@ -588,11 +584,11 @@ def test_threadpool_multistart_validation(monkeypatch):
         tp.start()
 
 
-def test_overload_results_in_suitable_http_error(request):
-    """A server that can't keep up with requests returns a 503 HTTP error."""
-    localhost = '127.0.0.1'
+@pytest.fixture
+def overloaded_http_server() -> _t.Iterator[HTTPServer]:
+    """Return a running server that answers every request with a 503."""
     httpserver = HTTPServer(
-        bind_addr=(localhost, EPHEMERAL_PORT),
+        bind_addr=('127.0.0.1', EPHEMERAL_PORT),
         gateway=Gateway,
     )
     # Can only handle on request in parallel:
@@ -607,45 +603,75 @@ def test_overload_results_in_suitable_http_error(request):
     httpserver.prepare()
     serve_thread = threading.Thread(target=httpserver.serve)
     serve_thread.start()
-    request.addfinalizer(httpserver.stop)
-    # Stop the thread pool to ensure the queue fills up:
-    httpserver.requests.stop()
+    try:
+        # Stop the thread pool to ensure the queue fills up:
+        httpserver.requests.stop()
 
-    _host, port = httpserver.bind_addr
+        # Use up the very limited thread pool queue we've set up, so future
+        # requests fail:
+        httpserver.requests._queue.put(None)
 
-    # Use up the very limited thread pool queue we've set up, so future
-    # requests fail:
-    httpserver.requests._queue.put(None)
+        yield httpserver
+    finally:
+        httpserver.stop()
 
-    response = requests.get(f'http://{localhost}:{port}', timeout=20)
+
+def test_overload_results_in_suitable_http_error(
+    overloaded_http_server: HTTPServer,
+) -> None:
+    """A server that can't keep up with requests returns a 503 HTTP error."""
+    host, port = overloaded_http_server.bind_addr
+
+    response = requests.get(f'http://{host}:{port}', timeout=20)
     assert response.status_code == HTTPStatus.SERVICE_UNAVAILABLE
 
 
-def test_serve_unservicable_logs_errors_without_crashing(mocker, capsys):
-    """A failure while sending a 503 must be logged, not raise AttributeError.
+def test_overload_survives_failure_to_send_http_error(
+    overloaded_http_server: HTTPServer,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An unexpected error while sending a 503 is logged, not fatal.
 
-    Regression test: ``HTTPServer._serve_unservicable()`` called
-    ``self.server.error_log(...)``, but ``HTTPServer`` has no ``server``
-    attribute -- that belongs to ``HTTPConnection``, which is a different
-    class. So instead of logging the original failure, it raised a fresh
-    ``AttributeError`` from within the except-block meant to keep this
-    background thread alive. See issue #797.
+    The overload handling must keep on answering later connections.
+
+    This is a test for issue #797.
     """
-    httpserver = HTTPServer.__new__(HTTPServer)
-    httpserver.ready = True
-    httpserver._unservicable_conns = queue.Queue()
-    fake_conn = mocker.Mock()
-    httpserver._unservicable_conns.put(fake_conn)
-    httpserver._unservicable_conns.put(_STOPPING_FOR_INTERRUPT)
+    host, port = overloaded_http_server.bind_addr
+    real_simple_response = HTTPRequest.simple_response
+    attempts = []
 
-    fake_request = mocker.Mock()
-    fake_request.simple_response.side_effect = ValueError('boom')
-    mocker.patch('cheroot.server.HTTPRequest', return_value=fake_request)
+    def failing_once_simple_response(
+        request: HTTPRequest,
+        status: str,
+        msg: str = '',
+    ) -> None:
+        attempts.append(status)
+        if len(attempts) == 1:
+            raise RuntimeError('unexpected failure sending the 503')
+        real_simple_response(request, status, msg)
 
-    httpserver._serve_unservicable()  # must not raise
+    monkeypatch.setattr(
+        HTTPRequest,
+        'simple_response',
+        failing_once_simple_response,
+    )
 
-    assert 'boom' in capsys.readouterr().err
-    fake_conn.close.assert_called_once()
+    # The server fails to send the 503 to this connection and leaves it
+    # lingering, so the client won't ever get a response over it:
+    with socket.create_connection((host, port), timeout=20):
+        # The overload thread handles connections one by one, so once this
+        # one is answered, the failed attempt above has been dealt with:
+        response = requests.get(f'http://{host}:{port}', timeout=20)
+
+    assert response.status_code == HTTPStatus.SERVICE_UNAVAILABLE
+
+    # The original failure is reported instead of a bogus `AttributeError`:
+    captured_stderr = capsys.readouterr().err
+    assert (
+        'RuntimeError: unexpected failure sending the 503' in captured_stderr
+    )
+    assert 'AttributeError' not in captured_stderr
 
 
 def test_overload_thread_does_not_leak():
