@@ -1,5 +1,5 @@
-Fixed :py:meth:`HTTPServer._serve_unservicable() <cheroot.server.HTTPServer._serve_unservicable>`
-raising an unrelated :py:exc:`AttributeError` instead of logging the original failure,
-when sending a ``503 Service Unavailable`` response itself raised an unexpected exception.
+Fixed the server stopping to answer overloaded connections with
+``503 Service Unavailable`` after a failure to send one of these responses.
+The failure is now logged and the following connections are still answered.
 
--- by :user:`Tatamis`
+-- by :user:`Tatamis`, :user:`avinashkamat48` and :user:`andrewkernel`
